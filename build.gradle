@@ -1,0 +1,65 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.ohhapple'
+version = '1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(11)   // 目标 Java 版本
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+compileJava {
+    options.release = 11
+
+    // 动态添加模块参数（仅在 Java 9+ 时需要）
+    if (JavaVersion.current().isJava9Compatible()) {
+        options.compilerArgs += ['--add-modules', 'jdk.attach']
+    } else {
+        // Java 8 及以下需要将 tools.jar 添加到 classpath（如果用到 attach API）
+        // 可在此处添加 tools.jar 依赖，例如：
+        // dependencies { compile files("${System.getProperty('java.home')}/../lib/tools.jar") }
+    }
+}
+
+task agentJar(type: Jar) {
+    archiveBaseName = 'agent'
+    archiveVersion = ''
+    destinationDirectory = file("$buildDir/libs")
+    manifest {
+        attributes(
+                'Agent-Class': 'MCModifier.ohhapple.SendMessageAgent',
+                'Can-Redefine-Classes': 'true',
+                'Can-Retransform-Classes': 'true'
+        )
+    }
+    from sourceSets.main.output
+    include 'MCModifier/ohhapple/SendMessageAgent.class'
+}
+
+jar {
+    manifest {
+        attributes('Main-Class': 'MCModifier.ohhapple.InjectorApp')
+    }
+    from(agentJar.outputs) {
+        into('')
+        rename('agent-.*\\.jar', 'agent.jar')
+    }
+    dependsOn agentJar
+}
