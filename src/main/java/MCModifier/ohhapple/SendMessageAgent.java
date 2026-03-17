@@ -1,10 +1,13 @@
 package MCModifier.ohhapple;
 
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.instrument.Instrumentation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.MalformedInputException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -17,16 +20,22 @@ public class SendMessageAgent {
 
     private static Path LOG_FILE;
     private static Path RULES_JSON;
+    private static final List<String> pendingLogs = new ArrayList<>(); // 暂存解析过程中的日志
 
     public static void agentmain(String agentArgs, Instrumentation inst) {
-        String outputDir = System.getProperty("user.dir");
+        // 初始时 LOG_FILE 为 null，所有日志暂存
+        LOG_FILE = null;
+        RULES_JSON = null;
+
+        String outputDir = null;  // 默认为 null，表示未指定
         String action = null;
         String commandsStr = null;
 
+        // 2. 解析 agentArgs 参数（此时 LOG_FILE 为 null，日志将被暂存）
         if (agentArgs != null && !agentArgs.trim().isEmpty()) {
             String trimmed = agentArgs.trim();
             if (trimmed.startsWith("{")) {
-                // 简易 JSON 解析
+                // JSON 格式参数解析
                 int actionIdx = trimmed.indexOf("\"action\"");
                 if (actionIdx >= 0) {
                     int colon = trimmed.indexOf(':', actionIdx);
@@ -63,35 +72,59 @@ public class SendMessageAgent {
                             int endQuote = trimmed.indexOf('"', startQuote + 1);
                             if (endQuote >= 0) {
                                 commandsStr = trimmed.substring(startQuote + 1, endQuote);
+                                logToFile("解码前的 commands: " + commandsStr);
+                                // 解码转义序列
+                                commandsStr = unquote(commandsStr);
+                                logToFile("解码后的 commands: " + commandsStr);
                             }
                         }
                     }
                 }
             } else {
+                // 非 JSON 格式，直接作为 commands 处理
                 action = "commands";
                 commandsStr = trimmed;
+                logToFile("解码前的 commands: " + commandsStr);
+                commandsStr = unquote(commandsStr);
+                logToFile("解码后的 commands: " + commandsStr);
             }
         }
 
+        // 3. 确定输出目录：如果未指定，则使用当前工作目录（理论上不会发生，因为 InjectorApp 总会提供）
+        if (outputDir == null || outputDir.isEmpty()) {
+            outputDir = System.getProperty("user.dir");
+        }
+
+        // 4. 根据 outputDir 设置日志文件路径
         Path dir = Paths.get(outputDir);
         LOG_FILE = dir.resolve("carpet_agent.log");
         RULES_JSON = dir.resolve("carpet_rules.json");
 
+        // 确保日志目录存在
         try {
-            Files.deleteIfExists(LOG_FILE);
-        } catch (Exception ignored) {}
+            Files.createDirectories(LOG_FILE.getParent());
+        } catch (IOException e) {
+            // 忽略，后续写入会处理
+        }
 
+        // 5. 将暂存日志写入文件
+        flushPendingLogs();
+
+        // 6. 记录启动信息
         logToFile("=== Agent 启动，参数: " + agentArgs + " ===");
         logToFile("输出目录: " + outputDir);
         logToFile("解析到的 action: " + action);
         if (commandsStr != null) {
-            logToFile("解析到的 commands: " + commandsStr);
+            logToFile("最终 commands: " + commandsStr);
         }
 
         if (action == null) {
             logToFile("未识别到有效操作，退出。");
             return;
         }
+
+        // 7. 写入MC日志路径（每次覆盖旧文件）
+        writeMcLogPath(inst);
 
         String finalAction = action;
         String finalCommands = commandsStr;
@@ -102,6 +135,9 @@ public class SendMessageAgent {
                 } else if ("commands".equals(finalAction)) {
                     String cmdToExecute = finalCommands != null ? finalCommands : agentArgs;
                     executeCommands(cmdToExecute, inst);
+                } else if ("ping".equals(finalAction)) {
+                    logToFile("收到 ping 请求，仅写入日志路径");
+                    // 什么都不做，路径已经在 writeMcLogPath 中写入了
                 } else {
                     logToFile("未知 action: " + finalAction);
                 }
@@ -111,6 +147,119 @@ public class SendMessageAgent {
                 e.printStackTrace();
             }
         }).start();
+    }
+
+    // 刷新暂存日志到文件
+    private static void flushPendingLogs() {
+        synchronized (pendingLogs) {
+            for (String msg : pendingLogs) {
+                writeLogLine(msg);
+            }
+            pendingLogs.clear();
+        }
+    }
+
+    // 实际的日志写入方法（不含暂存逻辑）
+    private static void writeLogLine(String msg) {
+        try {
+            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            String line = timestamp + " - " + msg + System.lineSeparator();
+            byte[] lineBytes = line.getBytes(StandardCharsets.UTF_8);
+            Files.write(LOG_FILE, lineBytes, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+
+            // 限制日志行数为 100
+            List<String> lines;
+            try {
+                lines = Files.readAllLines(LOG_FILE, StandardCharsets.UTF_8);
+            } catch (MalformedInputException e) {
+                // 文件编码损坏，直接覆盖为当前行并返回
+                Files.write(LOG_FILE, lineBytes, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE);
+                return;
+            }
+
+            if (lines.size() > 100) {
+                List<String> last100 = lines.subList(lines.size() - 100, lines.size());
+                Files.write(LOG_FILE, last100, StandardCharsets.UTF_8,
+                        StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE);
+            }
+        } catch (Exception e) {
+            // 静默失败，不再输出到控制台
+        }
+    }
+
+    // 日志记录方法：如果 LOG_FILE 未初始化，则暂存消息；否则直接写入
+    private static void logToFile(String msg) {
+        if (LOG_FILE == null) {
+            synchronized (pendingLogs) {
+                pendingLogs.add(msg);
+            }
+        } else {
+            writeLogLine(msg);
+        }
+    }
+
+    // ==================== 以下为原有功能方法，保持不变 ====================
+
+    private static void writeMcLogPath(Instrumentation inst) {
+        try {
+            String logPath = getMinecraftLogPath(inst);
+            if (logPath != null) {
+                Path pathFile = LOG_FILE.getParent().resolve("mc_log_path.txt");
+                Files.write(pathFile, logPath.getBytes(StandardCharsets.UTF_8),
+                        StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+                logToFile("MC日志路径已写入: " + pathFile);
+            } else {
+                logToFile("无法获取MC日志路径");
+            }
+        } catch (Exception e) {
+            logToFile("写入MC日志路径异常: " + e);
+        }
+    }
+
+    private static String getMinecraftLogPath(Instrumentation inst) {
+        try {
+            // 优先尝试服务端
+            Class<?> serverClass = findLoadedClass(inst, "net.minecraft.server.MinecraftServer");
+            if (serverClass != null) {
+                String userDir = System.getProperty("user.dir");
+                Path logPath = Paths.get(userDir, "logs", "latest.log");
+                if (Files.exists(logPath) || Files.exists(logPath.getParent())) {
+                    return logPath.toString();
+                }
+            }
+
+            // 尝试客户端
+            Object mc = getMinecraftInstance(inst);
+            if (mc != null) {
+                try {
+                    Method getGameDir = mc.getClass().getMethod("getGameDir");
+                    Object gameDirObj = getGameDir.invoke(mc);
+                    if (gameDirObj instanceof java.io.File) {
+                        java.io.File gameDir = (java.io.File) gameDirObj;
+                        Path logPath = gameDir.toPath().resolve("logs").resolve("latest.log");
+                        return logPath.toString();
+                    } else if (gameDirObj instanceof Path) {
+                        Path gameDir = (Path) gameDirObj;
+                        Path logPath = gameDir.resolve("logs").resolve("latest.log");
+                        return logPath.toString();
+                    }
+                } catch (NoSuchMethodException ignored) {}
+
+                try {
+                    Field gameDirField = mc.getClass().getDeclaredField("gameDir");
+                    gameDirField.setAccessible(true);
+                    Object gameDirObj = gameDirField.get(mc);
+                    if (gameDirObj instanceof java.io.File) {
+                        java.io.File gameDir = (java.io.File) gameDirObj;
+                        Path logPath = gameDir.toPath().resolve("logs").resolve("latest.log");
+                        return logPath.toString();
+                    }
+                } catch (NoSuchFieldException ignored) {}
+            }
+        } catch (Exception e) {
+            logToFile("获取MC日志路径异常: " + e);
+        }
+        return null;
     }
 
     private static void executeCommands(String commandsStr, Instrumentation inst) {
@@ -146,7 +295,6 @@ public class SendMessageAgent {
         }
     }
 
-    // ==================== 服务端命令执行 ====================
     private static boolean executeViaServer(String command, Instrumentation inst) {
         logToFile("executeViaServer 被调用，命令: " + command);
         logToFile("尝试通过服务器实例执行命令...");
@@ -163,14 +311,9 @@ public class SendMessageAgent {
         }
     }
 
-    /**
-     * 获取 MinecraftServer 实例
-     * 优先通过 CarpetServer.minecraft_server 静态字段获取
-     */
     private static Object getServerInstance(Instrumentation inst) {
         logToFile("开始获取服务器实例...");
 
-        // 优先尝试从 CarpetServer 的静态字段 minecraft_server 获取
         try {
             Class<?> carpetServerClass = findLoadedClass(inst, "carpet.CarpetServer");
             if (carpetServerClass != null) {
@@ -190,13 +333,11 @@ public class SendMessageAgent {
             logToFile("通过 CarpetServer 获取服务器实例异常: " + e);
         }
 
-        // 回退到原有的搜索逻辑（遍历 MinecraftServer 类及其子类）
         try {
             Class<?> serverClass = findLoadedClass(inst, "net.minecraft.server.MinecraftServer");
             if (serverClass != null) {
                 logToFile("找到 MinecraftServer 类: " + serverClass.getName() + "，类加载器: " + serverClass.getClassLoader());
 
-                // 尝试所有静态方法（无参，返回类型为 MinecraftServer 或其子类）
                 for (Method method : serverClass.getDeclaredMethods()) {
                     if (java.lang.reflect.Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0 &&
                             serverClass.isAssignableFrom(method.getReturnType())) {
@@ -213,8 +354,7 @@ public class SendMessageAgent {
                     }
                 }
 
-                // 尝试常见静态字段
-                String[] staticFieldNames = {"SERVER", "INSTANCE", "server", "instance"};
+                String[] staticFieldNames = {"SERVER", "INSTANCE", "server", "instance", "MinecraftServer"};
                 for (String fieldName : staticFieldNames) {
                     try {
                         Field field = serverClass.getDeclaredField(fieldName);
@@ -234,7 +374,6 @@ public class SendMessageAgent {
                     }
                 }
 
-                // 遍历子类
                 List<Class<?>> subClasses = new ArrayList<>();
                 for (Class<?> cls : inst.getAllLoadedClasses()) {
                     if (cls != null && serverClass.isAssignableFrom(cls) && cls != serverClass) {
@@ -246,7 +385,6 @@ public class SendMessageAgent {
 
                 for (Class<?> cls : subClasses) {
                     logToFile("检查子类: " + cls.getName());
-                    // 尝试常见字段
                     for (String fieldName : staticFieldNames) {
                         try {
                             Field field = cls.getDeclaredField(fieldName);
@@ -266,7 +404,6 @@ public class SendMessageAgent {
                         }
                     }
 
-                    // 搜索所有静态字段
                     for (Field field : cls.getDeclaredFields()) {
                         if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) {
                             Class<?> type = field.getType();
@@ -285,7 +422,6 @@ public class SendMessageAgent {
                         }
                     }
 
-                    // 搜索所有静态方法
                     for (Method method : cls.getDeclaredMethods()) {
                         if (java.lang.reflect.Modifier.isStatic(method.getModifiers()) && method.getParameterCount() == 0 &&
                                 serverClass.isAssignableFrom(method.getReturnType())) {
@@ -309,7 +445,6 @@ public class SendMessageAgent {
             logToFile("从 MinecraftServer 类获取实例异常: " + e);
         }
 
-        // 尝试从客户端 Minecraft 获取集成服务器（备用）
         try {
             Object mc = getMinecraftInstance(inst);
             if (mc != null) {
@@ -349,9 +484,6 @@ public class SendMessageAgent {
         return null;
     }
 
-    /**
-     * 在服务器实例上执行命令
-     */
     private static boolean executeCommandOnServer(Object server, String command) {
         try {
             logToFile("服务器实例类: " + server.getClass().getName());
@@ -365,7 +497,6 @@ public class SendMessageAgent {
             Class<?> sourceClass = commandSource.getClass();
             logToFile("命令源类: " + sourceClass.getName());
 
-            // 尝试 performPrefixedCommand
             try {
                 Method performPrefixed = commands.getClass().getMethod("performPrefixedCommand", sourceClass, String.class);
                 logToFile("找到方法 performPrefixedCommand，尝试执行...");
@@ -378,7 +509,6 @@ public class SendMessageAgent {
                 logToFile("performPrefixedCommand 调用异常: " + e);
             }
 
-            // 尝试 performCommand
             try {
                 Method performCommand = commands.getClass().getMethod("performCommand", sourceClass, String.class);
                 logToFile("找到方法 performCommand，尝试执行...");
@@ -392,7 +522,6 @@ public class SendMessageAgent {
                 logToFile("performCommand 调用异常: " + e);
             }
 
-            // 尝试 CommandDispatcher.execute
             try {
                 Method getDispatcher = commands.getClass().getMethod("getDispatcher");
                 Object dispatcher = getDispatcher.invoke(commands);
@@ -416,7 +545,6 @@ public class SendMessageAgent {
         }
     }
 
-    // ==================== 客户端命令发送 ====================
     private static boolean executeViaPlayer(String command, Instrumentation inst) {
         logToFile("executeViaPlayer 被调用，命令: " + command);
         logToFile("尝试通过玩家发送命令...");
@@ -553,7 +681,6 @@ public class SendMessageAgent {
         return null;
     }
 
-    // ==================== 规则导出 ====================
     private static void exportRulesToJson(Instrumentation inst) {
         logToFile("开始导出规则...");
         List<Map<String, Object>> rulesList = new ArrayList<>();
@@ -591,7 +718,6 @@ public class SendMessageAgent {
                 String def = getFieldValue(rule, "default", "defaultValue", "def");
                 map.put("default", def != null ? def : "");
 
-                // categories
                 List<String> categories = new ArrayList<>();
                 Object catObj = null;
                 try {
@@ -625,7 +751,6 @@ public class SendMessageAgent {
                     map.put("categories", categories);
                 }
 
-                // options
                 List<String> options = new ArrayList<>();
                 Object optObj = null;
                 try {
@@ -710,11 +835,10 @@ public class SendMessageAgent {
             json.append("]");
 
             logToFile("写入 JSON 到文件: " + RULES_JSON);
-            Files.write(RULES_JSON, json.toString().getBytes());
+            Files.write(RULES_JSON, json.toString().getBytes(StandardCharsets.UTF_8));
             logToFile("规则已成功导出到: " + RULES_JSON);
         } catch (Exception e) {
             logToFile("导出规则失败: " + e);
-            // 记录堆栈
             StringWriter sw = new StringWriter();
             PrintWriter pw = new PrintWriter(sw);
             e.printStackTrace(pw);
@@ -746,14 +870,49 @@ public class SendMessageAgent {
                 .replace("\t", "\\t");
     }
 
-    private static void logToFile(String msg) {
-        try {
-            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-            String line = timestamp + " - " + msg + System.lineSeparator();
-            Files.write(LOG_FILE, line.getBytes(), StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (Exception e) {
-            System.err.println("[CarpetAgent] " + msg);
-            e.printStackTrace();
+    private static String unquote(String s) {
+        if (s == null) return null;
+        if (s.startsWith("\"") && s.endsWith("\"")) {
+            s = s.substring(1, s.length() - 1);
         }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                char next = s.charAt(i + 1);
+                switch (next) {
+                    case '"': sb.append('"'); i++; break;
+                    case '\\': sb.append('\\'); i++; break;
+                    case '/': sb.append('/'); i++; break;
+                    case 'b': sb.append('\b'); i++; break;
+                    case 'f': sb.append('\f'); i++; break;
+                    case 'n': sb.append('\n'); i++; break;
+                    case 'r': sb.append('\r'); i++; break;
+                    case 't': sb.append('\t'); i++; break;
+                    case 'u':
+                        if (i + 5 < s.length()) {
+                            String hex = s.substring(i + 2, i + 6);
+                            try {
+                                int code = Integer.parseInt(hex, 16);
+                                sb.append((char) code);
+                                i += 5;
+                            } catch (NumberFormatException e) {
+                                sb.append('\\').append('u').append(hex);
+                                i += 5;
+                            }
+                        } else {
+                            sb.append('\\').append('u');
+                            i++;
+                        }
+                        break;
+                    default:
+                        sb.append('\\').append(next);
+                        i++;
+                }
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 }

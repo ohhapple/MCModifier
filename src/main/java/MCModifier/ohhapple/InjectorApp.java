@@ -11,12 +11,15 @@ import javax.swing.event.PopupMenuEvent;
 import javax.swing.event.PopupMenuListener;
 import javax.swing.plaf.basic.BasicComboBoxRenderer;
 import javax.swing.plaf.basic.BasicScrollBarUI;
+import javax.swing.text.*;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.*;
 import java.net.URL;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -28,15 +31,22 @@ import java.util.jar.JarFile;
 
 public class InjectorApp extends JFrame {
 
-    private JTextArea logArea;
+    private JTextPane logPane;
+    private StyledDocument logDocument;
+    private Style programStyle;
+    private Style mcStyle;
+
     private JButton refreshButton;
     private JButton injectButton;
     private JButton loadRulesButton;
     private JComboBox<ProcessItem> processCombo;
     private File agentTempFile;
 
-    private JPanel rulesPanel;          // 包含规则行的面板（可滚动）
-    private JPanel fixedHeaderPanel;     // 固定表头面板
+    // 命令行输入框
+    private JTextField commandInputField;
+
+    private JPanel rulesPanel;
+    private JPanel fixedHeaderPanel;
     private JScrollPane rulesScrollPane;
     private List<RuleUI> ruleUIs = new ArrayList<>();
 
@@ -45,27 +55,46 @@ public class InjectorApp extends JFrame {
     private JTextField searchField;
     private JPanel filterPanel;
 
-    // 深色主题颜色定义（最终版）
-    private static final Color COLOR_BG_PRIMARY = new Color(43, 43, 43);        // 主背景
-    private static final Color COLOR_BG_SECONDARY = new Color(60, 63, 65);     // 面板背景
-    private static final Color COLOR_BG_INPUT = new Color(90, 90, 90);         // 输入框/下拉框背景（提亮）
-    private static final Color COLOR_BG_DROPDOWN = new Color(70, 70, 70);      // 下拉框弹出菜单背景
-    private static final Color COLOR_FG_PRIMARY = new Color(187, 187, 187);    // 主要前景
-    private static final Color COLOR_FG_BRIGHT = new Color(220, 220, 220);     // 高亮前景
-    private static final Color COLOR_BORDER = new Color(140, 140, 140);        // 边框颜色
-    private static final Color COLOR_BUTTON_NORMAL = new Color(70, 130, 200);  // 普通按钮（亮蓝色）
-    private static final Color COLOR_BUTTON_HOVER = new Color(100, 160, 230);  // 按钮悬浮（更亮蓝）
-    private static final Color COLOR_BUTTON_PERMANENT = new Color(160, 100, 50); // 永久按钮（保留棕色）
-    private static final Color COLOR_CATEGORY = new Color(150, 150, 150);      // 分类文字
+    // MC日志监控相关（所有共享变量均使用 volatile 保证可见性）
+    private JButton mcLogMonitorButton;
+    private JComboBox<String> encodingCombo;
+    private volatile Thread mcLogMonitorThread;
+    private volatile Path mcLogPath;
+    private final Object monitorLock = new Object();
+    private volatile Charset currentCharset = StandardCharsets.UTF_8;
+    private volatile boolean monitoringEnabled = true;    // 默认开启
+    private volatile boolean waitingForLogPath = false;
+    private volatile Thread pingWaitThread;               // 专门等待日志路径的线程
+
+    // 配置文件
+    private Properties config = new Properties();
+
+    // 深色主题颜色定义
+    private static final Color COLOR_BG_PRIMARY = new Color(43, 43, 43);
+    private static final Color COLOR_BG_SECONDARY = new Color(60, 63, 65);
+    private static final Color COLOR_BG_INPUT = new Color(90, 90, 90);
+    private static final Color COLOR_BG_DROPDOWN = new Color(70, 70, 70);
+    private static final Color COLOR_FG_PRIMARY = new Color(187, 187, 187);
+    private static final Color COLOR_FG_BRIGHT = new Color(220, 220, 220);
+    private static final Color COLOR_BORDER = new Color(140, 140, 140);
+    private static final Color COLOR_BUTTON_NORMAL = new Color(70, 130, 200);
+    private static final Color COLOR_BUTTON_HOVER = new Color(100, 160, 230);
+    private static final Color COLOR_BUTTON_PERMANENT = new Color(160, 100, 50);
+    private static final Color COLOR_CATEGORY = new Color(150, 150, 150);
     private static final Color COLOR_TYPE_BOOLEAN = new Color(90, 180, 90);
     private static final Color COLOR_TYPE_ENUM = new Color(90, 140, 210);
-    private static final Color COLOR_TYPE_TEXT = new Color(180, 180, 180);     // 类型文字
+    private static final Color COLOR_TYPE_TEXT = new Color(180, 180, 180);
 
-    // 列宽约束（最小宽度，权重）
+    // 日志颜色
+    private static final Color COLOR_LOG_PROGRAM = new Color(100, 200, 255); // 青色
+    private static final Color COLOR_LOG_MC = new Color(255, 200, 100);      // 橙色
+
+    // 按钮状态颜色
+    private static final Color COLOR_MONITOR_ON = new Color(0, 150, 0);      // 绿色
+    private static final Color COLOR_MONITOR_OFF = new Color(200, 0, 0);    // 红色
+
     private static final int[] COL_MIN_WIDTHS = {120, 200, 60, 120, 60, 60, 140};
     private static final double[] COL_WEIGHTS = {0.12, 0.22, 0.06, 0.15, 0.08, 0.08, 0.29};
-
-    // 组件高度（不占满整行）
     private static final int COMPONENT_HEIGHT = 28;
 
     private static class ProcessItem {
@@ -105,64 +134,110 @@ public class InjectorApp extends JFrame {
         setSize(1400, 800);
         setLocationRelativeTo(null);
 
-        // 强制使用 Metal 外观，避免系统外观覆盖
         try {
             UIManager.setLookAndFeel("javax.swing.plaf.metal.MetalLookAndFeel");
         } catch (Exception e) {
             e.printStackTrace();
         }
 
-        // 设置窗口图标
         setIconImage(loadIcon());
-
-        // 强制设置根面板和内容面板背景
         getRootPane().setBackground(COLOR_BG_PRIMARY);
         getContentPane().setBackground(COLOR_BG_PRIMARY);
-
-        // 覆盖 UIManager 颜色
         overrideUIManagerColors();
-
-        // 设置全局字体
         setUIFont("微软雅黑", Font.PLAIN, 14);
 
-        // Tooltip 设置
         ToolTipManager ttm = ToolTipManager.sharedInstance();
         ttm.setInitialDelay(0);
         ttm.setDismissDelay(Integer.MAX_VALUE);
 
-        // 主布局
         setLayout(new BorderLayout(5, 5));
 
-        // 顶部面板
         JPanel topPanel = createTopPanel();
         add(topPanel, BorderLayout.NORTH);
 
-        // 中心面板（过滤 + 规则列表 + 固定表头）
         JPanel centerPanel = createCenterPanel();
         add(centerPanel, BorderLayout.CENTER);
 
-        // 底部日志面板
         JPanel bottomPanel = createBottomPanel();
         add(bottomPanel, BorderLayout.SOUTH);
 
-        // 释放 agent
         releaseAgentJar();
         refreshProcessList();
 
-        // 初始时移除焦点（窗口本身获得焦点）
+        // 加载配置
+        loadConfig();
+
+        // 显示欢迎信息
+        logProgram("=========================================");
+        logProgram(" MCModifier Made By ohhapple");
+        logProgram(" Homepage: https://ohhapple.github.io");
+        logProgram(" GitHub: https://github.com/ohhapple/MCModifier");
+        logProgram(" Copyright © 2026 ohhapple. All rights reserved.");
+        logProgram("=========================================");
+
+        // 启动时清除上次遗留的日志路径文件
+        Path logPathFile = getLogsDirectory().resolve("mc_log_path.txt");
+        try {
+            Files.deleteIfExists(logPathFile);
+        } catch (IOException ignored) {}
+
         SwingUtilities.invokeLater(() -> this.requestFocusInWindow());
-
-        // 为进程下拉框添加选择后移除焦点的监听
         processCombo.addActionListener(e -> SwingUtilities.invokeLater(() -> this.requestFocusInWindow()));
-
-        // 点击空白区域移除焦点
         setupGlobalFocusListener();
-
-        // 在显示后强制刷新（递归应用深色，但跳过按钮）
         SwingUtilities.invokeLater(() -> applyDarkTheme());
     }
 
-    /** 设置全局鼠标监听，点击非交互式组件时移除焦点 */
+    // ==================== 配置文件读写 ====================
+    private Path getConfigFile() {
+        return getLogsDirectory().resolve("config.properties");
+    }
+
+    private void loadConfig() {
+        Path configFile = getConfigFile();
+        if (Files.exists(configFile)) {
+            try (Reader reader = Files.newBufferedReader(configFile, StandardCharsets.UTF_8)) {
+                config.load(reader);
+            } catch (IOException e) {
+                logProgram("读取配置文件失败，使用默认设置: " + e.getMessage());
+            }
+        }
+
+        // 恢复监控开关状态
+        monitoringEnabled = Boolean.parseBoolean(config.getProperty("monitor_enabled", "true"));
+        updateMonitorButtonState();
+
+        // 恢复编码选择
+        String lastEncoding = config.getProperty("log_encoding", "自动");
+        encodingCombo.setSelectedItem(lastEncoding);
+        updateEncoding();
+
+        // 确保三个功能按钮背景色正确
+        refreshButton.setBackground(COLOR_BUTTON_NORMAL);
+        injectButton.setBackground(COLOR_BUTTON_NORMAL);
+        loadRulesButton.setBackground(COLOR_BUTTON_NORMAL);
+
+        // 确保按钮颜色刷新（延迟确保UI已初始化）
+        SwingUtilities.invokeLater(this::updateMonitorButtonState);
+    }
+
+    private void saveConfig() {
+        try {
+            Files.createDirectories(getConfigFile().getParent());
+            try (Writer writer = Files.newBufferedWriter(getConfigFile(), StandardCharsets.UTF_8)) {
+                String comments = "MCModifier Configuration\n" +
+                        "Author: ohhapple\n" +
+                        "Homepage: https://ohhapple.github.io\n" +
+                        "GitHub: https://github.com/ohhapple/MCModifier\n" +
+                        "Copyright (c) 2026 ohhapple. All rights reserved.";
+                config.store(writer, comments);
+            }
+        } catch (IOException e) {
+            logProgram("保存配置文件失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 界面构建方法 ====================
+
     private void setupGlobalFocusListener() {
         getContentPane().addMouseListener(new MouseAdapter() {
             @Override
@@ -175,7 +250,6 @@ public class InjectorApp extends JFrame {
         });
     }
 
-    /** 判断组件或其父组件是否为可聚焦的交互式组件 */
     private boolean isFocusableComponent(Component comp) {
         while (comp != null) {
             if (comp instanceof JTextField || comp instanceof JComboBox || comp instanceof JButton) {
@@ -194,7 +268,6 @@ public class InjectorApp extends JFrame {
         return null;
     }
 
-    /** 覆盖 UIManager 颜色 */
     private void overrideUIManagerColors() {
         UIManager.put("TextField.background", COLOR_BG_INPUT);
         UIManager.put("TextField.foreground", COLOR_FG_BRIGHT);
@@ -230,15 +303,12 @@ public class InjectorApp extends JFrame {
     }
 
     private Font createFontSafely(String preferredFontName, int style, int size) {
-        // 获取系统所有可用字体名称
         String[] availableFonts = GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames();
-        // 检查首选字体是否存在
         for (String font : availableFonts) {
             if (font.equalsIgnoreCase(preferredFontName)) {
                 return new Font(preferredFontName, style, size);
             }
         }
-        // 备选字体列表（按优先级排列）
         String[] fallbacks = {"SansSerif", "Dialog", "Arial", "Tahoma"};
         for (String fallback : fallbacks) {
             for (String font : availableFonts) {
@@ -247,13 +317,11 @@ public class InjectorApp extends JFrame {
                 }
             }
         }
-        // 兜底使用逻辑字体 SansSerif
         return new Font(Font.SANS_SERIF, style, size);
     }
 
     private void setUIFont(String fontName, int style, int size) {
         Font font = createFontSafely(fontName, style, size);
-
         UIManager.put("Button.font", font);
         UIManager.put("ToggleButton.font", font);
         UIManager.put("RadioButton.font", font);
@@ -287,22 +355,37 @@ public class InjectorApp extends JFrame {
         UIManager.put("Tree.font", font);
     }
 
-    /** 在窗口显示后强制应用深色主题（递归设置背景，但跳过按钮以保持动态颜色） */
     private void applyDarkTheme() {
         setDeepBackground(getContentPane(), COLOR_BG_PRIMARY);
         repaint();
+
+        // 显式设置三个功能按钮的背景色为正常色（防止被覆盖）
+        refreshButton.setBackground(COLOR_BUTTON_NORMAL);
+        injectButton.setBackground(COLOR_BUTTON_NORMAL);
+        loadRulesButton.setBackground(COLOR_BUTTON_NORMAL);
+        refreshButton.repaint();
+        injectButton.repaint();
+        loadRulesButton.repaint();
+
+        // 确保监控按钮颜色正确
+        SwingUtilities.invokeLater(() -> {
+            updateMonitorButtonState();
+            mcLogMonitorButton.repaint();
+        });
     }
 
-    /** 递归设置所有组件的背景、前景和边框（跳过按钮） */
     private void setDeepBackground(Container container, Color bg) {
         container.setBackground(bg);
         for (Component comp : container.getComponents()) {
-            // 跳过按钮，保持其动态颜色
+            // 所有按钮：完全跳过背景设置，但继续处理子组件（如果有）
             if (comp instanceof JButton) {
-                comp.setForeground(Color.WHITE);
+                if (comp instanceof Container) {
+                    setDeepBackground((Container) comp, bg);
+                }
                 continue;
             }
 
+            // 非按钮组件，统一设置背景
             comp.setBackground(bg);
 
             if (comp instanceof JComboBox) {
@@ -313,7 +396,6 @@ public class InjectorApp extends JFrame {
                     ((JComponent) cb).setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
                 }
                 fixComboEditor(cb);
-                // 统一为所有下拉框添加滚动条样式监听
                 setupComboScrollBar(cb);
             } else if (comp instanceof JTextField) {
                 JTextField tf = (JTextField) comp;
@@ -333,7 +415,6 @@ public class InjectorApp extends JFrame {
         }
     }
 
-    /** 为下拉框添加弹出菜单监听器，以设置其内部滚动条样式 */
     private void setupComboScrollBar(JComboBox<?> combo) {
         combo.addPopupMenuListener(new PopupMenuListener() {
             @Override
@@ -347,7 +428,6 @@ public class InjectorApp extends JFrame {
         });
     }
 
-    /** 强制修复下拉框编辑器背景，并设置合适高度 */
     private void fixComboEditor(JComboBox<?> combo) {
         Component editorComp = combo.getEditor().getEditorComponent();
         editorComp.setBackground(COLOR_BG_INPUT);
@@ -361,7 +441,6 @@ public class InjectorApp extends JFrame {
         editorComp.repaint();
     }
 
-    /** 设置下拉框弹出菜单中的滚动条为深色样式 */
     private void setComboPopupScrollBarUI(JComboBox<?> combo) {
         Object popup = combo.getAccessibleContext().getAccessibleChild(0);
         if (popup instanceof JComponent) {
@@ -369,7 +448,6 @@ public class InjectorApp extends JFrame {
         }
     }
 
-    /** 递归查找容器中的 JScrollPane 并设置其滚动条UI */
     private void findAndSetScrollBarUI(Container container) {
         for (Component comp : container.getComponents()) {
             if (comp instanceof JScrollPane) {
@@ -396,7 +474,53 @@ public class InjectorApp extends JFrame {
         processCombo.setRenderer(new ProcessItemRenderer());
         ((JComponent) processCombo).setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
         fixComboEditor(processCombo);
-        setupComboScrollBar(processCombo); // 统一设置滚动条样式
+        setupComboScrollBar(processCombo);
+
+        // 监控开关按钮：单独创建，不使用 createStyledButton 以避免鼠标悬停变色
+        mcLogMonitorButton = new JButton("● 监控中");
+        mcLogMonitorButton.setFocusPainted(false);
+        mcLogMonitorButton.setForeground(Color.WHITE);
+        mcLogMonitorButton.setFont(mcLogMonitorButton.getFont().deriveFont(Font.BOLD));
+        mcLogMonitorButton.setPreferredSize(new Dimension(130, COMPONENT_HEIGHT));
+        mcLogMonitorButton.setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
+        mcLogMonitorButton.setOpaque(true);
+        mcLogMonitorButton.addActionListener(e -> toggleMcLogMonitoring());
+        updateMonitorButtonState(); // 确保初始状态正确
+
+        // 编码选择
+        encodingCombo = new JComboBox<>(new String[]{"自动", "UTF-8", "GBK", "GB2312"});
+        encodingCombo.setBackground(COLOR_BG_INPUT);
+        encodingCombo.setForeground(COLOR_FG_BRIGHT);
+        encodingCombo.setRenderer(new DarkComboBoxRenderer());
+        ((JComponent) encodingCombo).setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
+        encodingCombo.setPreferredSize(new Dimension(100, 28));
+        encodingCombo.addActionListener(e -> {
+            updateEncoding();
+            saveConfig();
+        });
+        fixComboEditor(encodingCombo);
+        setupComboScrollBar(encodingCombo);
+
+        processCombo.addActionListener(e -> {
+            if (monitoringEnabled) {
+                // 停止当前监控（如果有）
+                stopMcLogMonitoring();
+                // 重置日志路径，确保下次启动监控时会重新 ping
+                synchronized (monitorLock) {
+                    mcLogPath = null;
+                    waitingForLogPath = false;
+                    // 删除旧的路径文件
+                    try {
+                        Path logPathFile = getLogsDirectory().resolve("mc_log_path.txt");
+                        Files.deleteIfExists(logPathFile);
+                    } catch (IOException ignored) {}
+                }
+                // 开始新的监控流程（会触发 ping）
+                startMcLogMonitoringIfNeeded();
+            } else {
+                stopMcLogMonitoring();
+            }
+        });
 
         refreshButton = createStyledButton("刷新进程列表", COLOR_BUTTON_NORMAL, COLOR_BUTTON_HOVER);
         injectButton = createStyledButton("执行命令", COLOR_BUTTON_NORMAL, COLOR_BUTTON_HOVER);
@@ -408,10 +532,11 @@ public class InjectorApp extends JFrame {
 
         JPanel leftPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         leftPanel.setBackground(COLOR_BG_SECONDARY);
-        JLabel lblTarget = new JLabel("目标进程:");
-        lblTarget.setForeground(COLOR_FG_PRIMARY);
-        leftPanel.add(lblTarget);
+        leftPanel.add(new JLabel("目标进程:"));
         leftPanel.add(processCombo);
+        leftPanel.add(mcLogMonitorButton);
+        leftPanel.add(new JLabel("编码:"));
+        leftPanel.add(encodingCombo);
 
         JPanel rightPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
         rightPanel.setBackground(COLOR_BG_SECONDARY);
@@ -424,12 +549,38 @@ public class InjectorApp extends JFrame {
         return panel;
     }
 
+    private void updateMonitorButtonState() {
+        if (monitoringEnabled) {
+            mcLogMonitorButton.setText("● 监控中");
+            mcLogMonitorButton.setBackground(COLOR_MONITOR_ON);
+            mcLogMonitorButton.setToolTipText("点击停止监控MC日志");
+        } else {
+            mcLogMonitorButton.setText("○ 已停止");
+            mcLogMonitorButton.setBackground(COLOR_MONITOR_OFF);
+            mcLogMonitorButton.setToolTipText("点击开始监控MC日志");
+        }
+        mcLogMonitorButton.setOpaque(true);
+        mcLogMonitorButton.repaint();
+    }
+
+    private void toggleMcLogMonitoring() {
+        monitoringEnabled = !monitoringEnabled;
+        updateMonitorButtonState();
+        config.setProperty("monitor_enabled", String.valueOf(monitoringEnabled));
+        saveConfig();
+        if (monitoringEnabled) {
+            startMcLogMonitoringIfNeeded();
+        } else {
+            stopMcLogMonitoring();
+        }
+    }
+
     private JPanel createCenterPanel() {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
         panel.setBackground(COLOR_BG_PRIMARY);
         panel.setBorder(BorderFactory.createEmptyBorder(0, 10, 10, 10));
 
-        // ========== 过滤面板 ==========
+        // 过滤面板
         filterPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 15, 5));
         filterPanel.setBackground(COLOR_BG_SECONDARY);
         filterPanel.setBorder(BorderFactory.createTitledBorder(
@@ -472,17 +623,14 @@ public class InjectorApp extends JFrame {
 
         panel.add(filterPanel, BorderLayout.NORTH);
 
-        // ========== 规则区域（固定表头 + 可滚动行） ==========
+        // 规则区域
         JPanel rulesArea = new JPanel(new BorderLayout());
         rulesArea.setBackground(COLOR_BG_PRIMARY);
 
-        // 创建固定表头
         fixedHeaderPanel = createHeaderRow();
         fixedHeaderPanel.setBackground(COLOR_BG_SECONDARY);
-        // 移除表头自身的边框（因为滚动面板会提供整体边框）
         fixedHeaderPanel.setBorder(BorderFactory.createEmptyBorder());
 
-        // 可滚动规则行
         rulesPanel = new JPanel();
         rulesPanel.setLayout(new BoxLayout(rulesPanel, BoxLayout.Y_AXIS));
         rulesPanel.setBackground(COLOR_BG_PRIMARY);
@@ -492,20 +640,17 @@ public class InjectorApp extends JFrame {
         rulesScrollPane.getVerticalScrollBar().setUnitIncrement(24);
         rulesScrollPane.getViewport().setBackground(COLOR_BG_PRIMARY);
 
-        // 设置深色滚动条
         rulesScrollPane.getVerticalScrollBar().setUI(new DarkScrollBarUI());
         rulesScrollPane.getHorizontalScrollBar().setUI(new DarkScrollBarUI());
 
-        // ★★★ 关键：将 fixedHeaderPanel 设置为列标题 ★★★
         rulesScrollPane.setColumnHeaderView(fixedHeaderPanel);
 
         rulesArea.add(rulesScrollPane, BorderLayout.CENTER);
-
         panel.add(rulesArea, BorderLayout.CENTER);
-
         return panel;
     }
 
+    // 底部面板：日志区域 + 一体化输入框
     private JPanel createBottomPanel() {
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBackground(COLOR_BG_SECONDARY);
@@ -514,21 +659,122 @@ public class InjectorApp extends JFrame {
                 "日志", TitledBorder.LEFT, TitledBorder.TOP));
         ((TitledBorder) panel.getBorder()).setTitleColor(COLOR_FG_PRIMARY);
 
-        logArea = new JTextArea();
-        logArea.setEditable(false);
-        logArea.setBackground(COLOR_BG_INPUT);
-        logArea.setForeground(COLOR_FG_BRIGHT);
-        logArea.setCaretColor(COLOR_FG_BRIGHT);
-        logArea.setFont(new Font("微软雅黑", Font.PLAIN, 13));
-        logArea.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        // 日志显示区域 - 自定义 JTextPane 强制跟踪视口宽度并支持字符级换行
+        logPane = new JTextPane() {
+            @Override
+            public boolean getScrollableTracksViewportWidth() {
+                return true; // 强制宽度跟随视口，实现自动换行
+            }
+        };
 
-        JScrollPane logScrollPane = new JScrollPane(logArea);
-        logScrollPane.setPreferredSize(new Dimension(1400, 180));
+        // 自定义 EditorKit 强制字符级换行
+        logPane.setEditorKit(new StyledEditorKit() {
+            @Override
+            public ViewFactory getViewFactory() {
+                return new ViewFactory() {
+                    @Override
+                    public View create(Element elem) {
+                        String kind = elem.getName();
+                        if (kind != null && kind.equals(AbstractDocument.ContentElementName)) {
+                            // 文本内容：返回自定义 LabelView，允许水平最小宽度为0
+                            return new LabelView(elem) {
+                                @Override
+                                public float getMinimumSpan(int axis) {
+                                    if (axis == View.X_AXIS) {
+                                        return 0; // 允许压缩到0，强制字符换行
+                                    }
+                                    return super.getMinimumSpan(axis);
+                                }
+                            };
+                        } else if (kind != null && kind.equals(AbstractDocument.ParagraphElementName)) {
+                            return new ParagraphView(elem);
+                        } else if (kind != null && kind.equals(AbstractDocument.SectionElementName)) {
+                            return new BoxView(elem, View.Y_AXIS);
+                        } else if (kind != null && kind.equals(StyleConstants.ComponentElementName)) {
+                            return new ComponentView(elem);
+                        } else if (kind != null && kind.equals(StyleConstants.IconElementName)) {
+                            return new IconView(elem);
+                        }
+                        // 默认返回 LabelView，同样允许换行
+                        return new LabelView(elem) {
+                            @Override
+                            public float getMinimumSpan(int axis) {
+                                if (axis == View.X_AXIS) {
+                                    return 0;
+                                }
+                                return super.getMinimumSpan(axis);
+                            }
+                        };
+                    }
+                };
+            }
+        });
+
+        logPane.setEditable(false);
+        logPane.setBackground(COLOR_BG_INPUT);
+        logPane.setFont(new Font("微软雅黑", Font.PLAIN, 13));
+        logPane.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        logDocument = logPane.getStyledDocument();
+
+        programStyle = logPane.addStyle("Program", null);
+        StyleConstants.setForeground(programStyle, COLOR_LOG_PROGRAM);
+        StyleConstants.setFontFamily(programStyle, "微软雅黑");
+        StyleConstants.setFontSize(programStyle, 13);
+
+        mcStyle = logPane.addStyle("MC", null);
+        StyleConstants.setForeground(mcStyle, COLOR_LOG_MC);
+        StyleConstants.setFontFamily(mcStyle, "微软雅黑");
+        StyleConstants.setFontSize(mcStyle, 13);
+
+        JScrollPane logScrollPane = new JScrollPane(logPane);
+        logScrollPane.setPreferredSize(new Dimension(1400, 200));
         logScrollPane.getViewport().setBackground(COLOR_BG_INPUT);
         logScrollPane.getVerticalScrollBar().setUI(new DarkScrollBarUI());
         logScrollPane.getHorizontalScrollBar().setUI(new DarkScrollBarUI());
+        logScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        logScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
 
-        panel.add(logScrollPane, BorderLayout.CENTER);
+        // 监听视口大小变化，强制更新 logPane 的宽度
+        logScrollPane.getViewport().addChangeListener(e -> {
+            int width = logScrollPane.getViewport().getWidth();
+            if (width > 0) {
+                logPane.setSize(width, logPane.getHeight());
+                logPane.revalidate();
+            }
+        });
+
+        // 命令行输入区域（一体化设计）
+        JPanel inputPanel = new JPanel(new BorderLayout());
+        inputPanel.setBackground(COLOR_BG_INPUT);
+        inputPanel.setBorder(BorderFactory.createEmptyBorder());
+
+        JLabel promptLabel = new JLabel("> ");
+        promptLabel.setForeground(COLOR_FG_BRIGHT);
+        promptLabel.setFont(promptLabel.getFont().deriveFont(Font.BOLD, 14f));
+        inputPanel.add(promptLabel, BorderLayout.WEST);
+
+        commandInputField = new JTextField();
+        commandInputField.setBackground(COLOR_BG_INPUT);
+        commandInputField.setForeground(COLOR_FG_BRIGHT);
+        commandInputField.setCaretColor(COLOR_FG_BRIGHT);
+        commandInputField.setBorder(BorderFactory.createEmptyBorder(5, 0, 5, 5));
+        commandInputField.setFont(new Font("微软雅黑", Font.PLAIN, 13));
+        commandInputField.addActionListener(e -> {
+            String cmd = commandInputField.getText().trim();
+            if (!cmd.isEmpty()) {
+                sendCommand(cmd);
+                commandInputField.setText("");
+            }
+        });
+        inputPanel.add(commandInputField, BorderLayout.CENTER);
+
+        // 将日志滚动面板和输入面板叠放在一起（输入面板在底部，无缝贴合）
+        JPanel logContainer = new JPanel(new BorderLayout(0, 0));
+        logContainer.setBackground(COLOR_BG_INPUT);
+        logContainer.add(logScrollPane, BorderLayout.CENTER);
+        logContainer.add(inputPanel, BorderLayout.SOUTH);
+
+        panel.add(logContainer, BorderLayout.CENTER);
         return panel;
     }
 
@@ -540,6 +786,7 @@ public class InjectorApp extends JFrame {
         button.setFont(button.getFont().deriveFont(Font.BOLD));
         button.setPreferredSize(new Dimension(130, COMPONENT_HEIGHT));
         button.setBorder(BorderFactory.createLineBorder(COLOR_BORDER));
+        button.setOpaque(true);
 
         button.addMouseListener(new MouseAdapter() {
             @Override
@@ -657,7 +904,276 @@ public class InjectorApp extends JFrame {
         }
     }
 
-    // ==================== 原有功能方法（保持不变） ====================
+    // ==================== 监控开关逻辑 ====================
+
+    private void updateEncoding() {
+        String selected = (String) encodingCombo.getSelectedItem();
+        if ("自动".equals(selected)) {
+            // 自动模式下，currentCharset 会在启动监控时动态设置，这里只保存配置
+            config.setProperty("log_encoding", "自动");
+            saveConfig();
+            return;
+        }
+        if ("GBK".equals(selected)) {
+            currentCharset = Charset.forName("GBK");
+        } else if ("GB2312".equals(selected)) {
+            currentCharset = Charset.forName("GB2312");
+        } else {
+            currentCharset = StandardCharsets.UTF_8;
+        }
+        config.setProperty("log_encoding", selected);
+        saveConfig();
+    }
+
+    private void stopMcLogMonitoring() {
+        synchronized (monitorLock) {
+            waitingForLogPath = false; // 停止等待
+            if (mcLogMonitorThread != null && mcLogMonitorThread.isAlive()) {
+                mcLogMonitorThread.interrupt();
+                mcLogMonitorThread = null;
+                logProgram("MC日志监控已停止");
+            }
+        }
+    }
+
+    private void startMcLogMonitoringIfNeeded() {
+        if (!monitoringEnabled) {
+            return;
+        }
+        if (mcLogMonitorThread != null && mcLogMonitorThread.isAlive()) {
+            return;
+        }
+
+        synchronized (monitorLock) {
+            if (mcLogPath != null && Files.exists(mcLogPath)) {
+                startMcLogMonitor(mcLogPath);
+            } else {
+                // 如果没有路径，主动尝试获取
+                if (!waitingForLogPath) {
+                    waitingForLogPath = true;
+                    injectPingToGetLogPath();
+                }
+            }
+        }
+    }
+
+    /**
+     * 等待 mc_log_path.txt 出现并启动监控（由 ping 线程调用）
+     */
+    private void waitForMcLogPathAndStart() {
+        // 方法开始时，确保自己是当前等待线程，并设置等待标志
+        synchronized (monitorLock) {
+            if (pingWaitThread != Thread.currentThread()) {
+                // 不是自己（可能已被中断且新线程已启动），直接退出
+                return;
+            }
+            waitingForLogPath = true;
+        }
+
+        Path logPathFile = getLogsDirectory().resolve("mc_log_path.txt");
+        long start = System.currentTimeMillis();
+        long timeout = 10000;
+        Path newPath = null;
+
+        while (System.currentTimeMillis() - start < timeout) {
+            if (Thread.currentThread().isInterrupted()) {
+                logProgram("等待日志路径被中断");
+                synchronized (monitorLock) {
+                    if (pingWaitThread == Thread.currentThread()) {
+                        waitingForLogPath = false;
+                        pingWaitThread = null;
+                    }
+                }
+                return;
+            }
+
+            if (Files.exists(logPathFile)) {
+                try {
+                    String content = new String(Files.readAllBytes(logPathFile), StandardCharsets.UTF_8).trim(); // 指定 UTF-8
+                    if (!content.isEmpty()) {
+                        newPath = Paths.get(content);
+                        logProgram("获取到MC日志路径: " + newPath);
+                        break;
+                    }
+                } catch (IOException ex) {
+                    logProgram("读取mc_log_path.txt失败: " + ex.getMessage());
+                }
+            }
+
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                logProgram("等待被中断");
+                synchronized (monitorLock) {
+                    if (pingWaitThread == Thread.currentThread()) {
+                        waitingForLogPath = false;
+                        pingWaitThread = null;
+                    }
+                }
+                return;
+            }
+        }
+
+        if (newPath != null) {
+            synchronized (monitorLock) {
+                mcLogPath = newPath;
+                if (monitoringEnabled && (mcLogMonitorThread == null || !mcLogMonitorThread.isAlive())) {
+                    startMcLogMonitor(mcLogPath);
+                }
+            }
+        } else {
+            logProgram("未能获取MC日志路径，无法监控MC日志");
+            // 删除无效的路径文件
+            try {
+                Files.deleteIfExists(logPathFile);
+            } catch (IOException ignored) {}
+        }
+
+        // 正常结束时清理，仅当自己仍是当前线程
+        synchronized (monitorLock) {
+            if (pingWaitThread == Thread.currentThread()) {
+                waitingForLogPath = false;
+                pingWaitThread = null;
+            }
+        }
+    }
+
+    /**
+     * 根据字节数组内容选择最佳编码（UTF-8 或 GBK）
+     * 优先规则：如果两种编码都没有出现替换字符，则默认 UTF-8；
+     * 否则按得分比较，得分高者胜，得分相同时 UTF-8。
+     */
+    private Charset selectBestCharset(byte[] data) {
+        Charset utf8 = StandardCharsets.UTF_8;
+        Charset gbk = Charset.forName("GBK");
+
+        // 分别解码并统计替换字符数量
+        String utf8Str = new String(data, utf8);
+        String gbkStr = new String(data, gbk);
+
+        int utf8Replacement = countReplacement(utf8Str);
+        int gbkReplacement = countReplacement(gbkStr);
+
+        // 如果两种都没有替换字符，优先 UTF-8
+        if (utf8Replacement == 0 && gbkReplacement == 0) {
+            return utf8;
+        }
+
+        // 否则，比较得分（得分计算已包含替换字符惩罚）
+        int scoreUTF8 = scoreCharset(data, utf8);
+        int scoreGBK = scoreCharset(data, gbk);
+
+        // 得分高者胜，相等时 UTF-8
+        return scoreUTF8 >= scoreGBK ? utf8 : gbk;
+    }
+
+    /**
+     * 统计字符串中替换字符（ ）的数量
+     */
+    private int countReplacement(String s) {
+        int count = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == '\uFFFD') {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int scoreCharset(byte[] data, Charset charset) {
+        try {
+            String decoded = new String(data, charset);
+            int score = 0;
+            for (int i = 0; i < decoded.length(); i++) {
+                char c = decoded.charAt(i);
+                if (c >= 0x20 && c < 0x7F) {
+                    score += 1; // 可读ASCII
+                } else if (c >= 0x4E00 && c <= 0x9FFF) {
+                    score += 3; // 中文字符
+                } else if (c == 0xFFFD) {
+                    score -= 10; // 替换字符（解码失败标记）
+                } else if (c > 0x7F) {
+                    score += 1; // 其他Unicode字符（如中文标点、日文等，视为有效）
+                }
+                // 其他控制字符（<0x20）不计分也不扣分
+            }
+            return score;
+        } catch (Exception e) {
+            return Integer.MIN_VALUE; // 解码异常，分数极低
+        }
+    }
+
+    private void startMcLogMonitor(Path logFile) {
+        stopMcLogMonitoring();
+
+        // 自动模式初始设为 UTF-8
+        if ("自动".equals(encodingCombo.getSelectedItem())) {
+            currentCharset = StandardCharsets.UTF_8;
+            logProgram("自动模式，初始编码设为 UTF-8，将根据内容动态选择编码");
+        } else {
+            updateEncoding();
+        }
+
+        mcLogMonitorThread = new Thread(() -> {
+            long lastSize = 0;
+            if (Files.exists(logFile)) {
+                try {
+                    lastSize = Files.size(logFile);
+                } catch (IOException e) {
+                    // ignore
+                }
+            }
+
+            while (!Thread.currentThread().isInterrupted()) {
+                if (Files.exists(logFile)) {
+                    try {
+                        long currentSize = Files.size(logFile);
+                        if (currentSize < lastSize) {
+                            lastSize = 0;
+                        }
+                        if (currentSize > lastSize) {
+                            byte[] allBytes = Files.readAllBytes(logFile);
+                            byte[] addedBytes = Arrays.copyOfRange(allBytes, (int) lastSize, allBytes.length);
+                            lastSize = allBytes.length;
+
+                            // 如果是自动模式，动态选择最佳编码
+                            Charset selectedCharset;
+                            if ("自动".equals(encodingCombo.getSelectedItem())) {
+                                selectedCharset = selectBestCharset(addedBytes);
+                                if (!selectedCharset.equals(currentCharset)) {
+                                    currentCharset = selectedCharset;
+                                    logProgram("自动切换编码为: " + currentCharset.displayName());
+                                }
+                            } else {
+                                selectedCharset = currentCharset; // 使用用户指定的编码
+                            }
+
+                            String addedStr = new String(addedBytes, selectedCharset);
+                            String[] lines = addedStr.split("\\R");
+                            for (String line : lines) {
+                                if (!line.isEmpty()) {
+                                    final String finalLine = line;
+                                    SwingUtilities.invokeLater(() -> logMC(finalLine));
+                                }
+                            }
+                        }
+                    } catch (IOException ex) {
+                        // ignore
+                    }
+                }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
+        mcLogMonitorThread.setDaemon(true);
+        mcLogMonitorThread.start();
+        logProgram("MC日志监控已启动，编码: " + currentCharset.displayName());
+    }
+
+    // ==================== 原有功能方法（精简日志） ====================
 
     private Path getLogsDirectory() {
         Path jarDir = Paths.get(getJarDirectory());
@@ -667,7 +1183,7 @@ public class InjectorApp extends JFrame {
                 Files.createDirectories(logsDir);
             } catch (IOException e) {
                 e.printStackTrace();
-                log("创建日志目录失败: " + e.getMessage());
+                logProgram("创建日志目录失败: " + e.getMessage());
             }
         }
         return logsDir;
@@ -704,7 +1220,7 @@ public class InjectorApp extends JFrame {
                 try (JarFile jar = new JarFile(jarPath)) {
                     JarEntry entry = jar.getJarEntry("agent.jar");
                     if (entry == null) {
-                        log("错误：内嵌的agent.jar未找到，请重新打包。");
+                        logProgram("错误：内嵌的agent.jar未找到，请重新打包。");
                         return;
                     }
                     agentTempFile = File.createTempFile("mcagent_", ".jar");
@@ -712,14 +1228,14 @@ public class InjectorApp extends JFrame {
                     try (InputStream in = jar.getInputStream(entry)) {
                         Files.copy(in, agentTempFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                     }
-                    log("Agent临时文件已创建：" + agentTempFile.getAbsolutePath());
+                    logProgram("Agent临时文件已创建");
                 }
             } else {
-                log("警告：未从JAR运行，无法释放agent.jar，请先打包。");
+                logProgram("警告：未从JAR运行，无法释放agent.jar，请先打包。");
             }
         } catch (Exception e) {
             e.printStackTrace();
-            log("释放agent.jar失败：" + e.getMessage());
+            logProgram("释放agent.jar失败：" + e.getMessage());
         }
     }
 
@@ -732,7 +1248,7 @@ public class InjectorApp extends JFrame {
         try {
             List<VirtualMachineDescriptor> vms = VirtualMachine.list();
             if (vms.isEmpty()) {
-                log("未找到任何Java进程。");
+                logProgram("未找到任何Java进程。");
                 return;
             }
             for (VirtualMachineDescriptor vmd : vms) {
@@ -749,10 +1265,49 @@ public class InjectorApp extends JFrame {
                         || displayName.contains("spigot");
                 processCombo.addItem(new ProcessItem(pid, displayName, isServer));
             }
-            log("已刷新进程列表，共 " + vms.size() + " 个Java进程。");
+            logProgram("已刷新进程列表，共 " + vms.size() + " 个Java进程。");
         } catch (Exception e) {
             e.printStackTrace();
-            log("获取进程列表失败：" + e.getMessage());
+            logProgram("获取进程列表失败：" + e.getMessage());
+        }
+    }
+
+    private String escapeJsonString(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder();
+        for (char c : s.toCharArray()) {
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '/': sb.append("\\/"); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else if (c > 0x7F) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
+    }
+
+    private void sendCommand(String command) {
+        if (command.trim().isEmpty()) return;
+        Path logsDir = getLogsDirectory();
+        String escapedCommand = escapeJsonString(command.trim());
+        String agentArgs = "{\"action\":\"commands\",\"commands\":\"" + escapedCommand + "\",\"outputDir\":\"" + logsDir.toString().replace("\\", "\\\\") + "\"}";
+        injectAgent(agentArgs);
+        mcLogPath = null; // volatile 赋值，保证可见性
+
+        if (monitoringEnabled) {
+            startMcLogMonitoringIfNeeded();
         }
     }
 
@@ -764,9 +1319,14 @@ public class InjectorApp extends JFrame {
             return;
         }
         Path logsDir = getLogsDirectory();
-        String agentArgs = "{\"action\":\"commands\",\"commands\":\"" + commandStr.trim() + "\",\"outputDir\":\"" + logsDir.toString().replace("\\", "\\\\") + "\"}";
-        log("生成的参数: " + agentArgs);
+        String escapedCommands = escapeJsonString(commandStr.trim());
+        String agentArgs = "{\"action\":\"commands\",\"commands\":\"" + escapedCommands + "\",\"outputDir\":\"" + logsDir.toString().replace("\\", "\\\\") + "\"}";
         injectAgent(agentArgs);
+        mcLogPath = null; // volatile 赋值，保证可见性
+
+        if (monitoringEnabled) {
+            startMcLogMonitoringIfNeeded();
+        }
     }
 
     private void onLoadRules(ActionEvent e) {
@@ -789,19 +1349,19 @@ public class InjectorApp extends JFrame {
                 }
                 try { Thread.sleep(500); } catch (InterruptedException ignored) {}
             }
-            log("等待规则文件超时");
+            logProgram("等待规则文件超时");
         }).start();
     }
 
     private void loadRulesFromFile(Path jsonFile) {
         try {
-            String content = new String(Files.readAllBytes(jsonFile));
+            String content = new String(Files.readAllBytes(jsonFile), StandardCharsets.UTF_8); // 指定 UTF-8
             allRules = parseJson(content);
             buildCategoryCombo();
             applyFilter();
-            log("已加载 " + allRules.size() + " 条规则");
+            logProgram("已加载 " + allRules.size() + " 条规则");
         } catch (Exception e) {
-            log("解析规则文件失败: " + e);
+            logProgram("解析规则文件失败: " + e);
             e.printStackTrace();
         }
     }
@@ -1070,7 +1630,7 @@ public class InjectorApp extends JFrame {
         gbc.gridx = 1; gbc.weightx = COL_WEIGHTS[1];
         row.add(nameLabel, gbc);
 
-        // 类型标签（修改点：使用 isStrictBoolean 判断）
+        // 类型标签
         String typeText = "";
         Color typeColor = COLOR_TYPE_TEXT;
         if (options != null && !options.isEmpty()) {
@@ -1094,7 +1654,6 @@ public class InjectorApp extends JFrame {
         // 编辑器
         JComponent editor;
         if (options != null && !options.isEmpty()) {
-            // 选项保持原样，不进行大小写转换
             String[] cleanedOptions = options.stream()
                     .map(String::trim)
                     .map(s -> {
@@ -1118,7 +1677,6 @@ public class InjectorApp extends JFrame {
             fixComboEditor(combo);
             setupComboScrollBar(combo);
 
-            // 当前值处理：布尔类型转换为小写以匹配选项，枚举保留原样
             String cleanCurrent = currentValue == null ? "" : currentValue.trim().replaceAll("^\"|\"$", "");
             if (isStrictBoolean(options)) {
                 cleanCurrent = cleanCurrent.toLowerCase();
@@ -1157,8 +1715,12 @@ public class InjectorApp extends JFrame {
             }
             newValue = normalizeValue(newValue, options);
             String command = "carpet " + name + " " + newValue;
-            log("发送命令: " + command);
-            injectAgent("{\"action\":\"commands\",\"commands\":\"" + command + "\",\"outputDir\":\"" + getLogsDirectory().toString().replace("\\", "\\\\") + "\"}");
+            logProgram("发送命令: " + command);
+            String escapedCommand = escapeJsonString(command);
+            injectAgent("{\"action\":\"commands\",\"commands\":\"" + escapedCommand + "\",\"outputDir\":\"" + getLogsDirectory().toString().replace("\\", "\\\\") + "\"}");
+            if (monitoringEnabled) {
+                startMcLogMonitoringIfNeeded();
+            }
         });
         gbc.gridx = 4; gbc.weightx = COL_WEIGHTS[4];
         row.add(apply, gbc);
@@ -1181,8 +1743,12 @@ public class InjectorApp extends JFrame {
             }
             newValue = normalizeValue(newValue, options);
             String command = "carpet setDefault " + name + " " + newValue;
-            log("发送永久更改命令: " + command);
-            injectAgent("{\"action\":\"commands\",\"commands\":\"" + command + "\",\"outputDir\":\"" + getLogsDirectory().toString().replace("\\", "\\\\") + "\"}");
+            logProgram("发送永久更改命令: " + command);
+            String escapedCommand = escapeJsonString(command);
+            injectAgent("{\"action\":\"commands\",\"commands\":\"" + escapedCommand + "\",\"outputDir\":\"" + getLogsDirectory().toString().replace("\\", "\\\\") + "\"}");
+            if (monitoringEnabled) {
+                startMcLogMonitoringIfNeeded();
+            }
         });
         gbc.gridx = 5; gbc.weightx = COL_WEIGHTS[5];
         row.add(permanent, gbc);
@@ -1200,7 +1766,6 @@ public class InjectorApp extends JFrame {
         return row;
     }
 
-
     private boolean isStrictBoolean(List<String> options) {
         if (options == null || options.size() != 2) return false;
         boolean hasTrue = false;
@@ -1208,7 +1773,7 @@ public class InjectorApp extends JFrame {
         for (String opt : options) {
             if ("true".equalsIgnoreCase(opt)) hasTrue = true;
             else if ("false".equalsIgnoreCase(opt)) hasFalse = true;
-            else return false; // 存在其他选项
+            else return false;
         }
         return hasTrue && hasFalse;
     }
@@ -1229,54 +1794,141 @@ public class InjectorApp extends JFrame {
 
     private void injectAgent(String agentArgs) {
         if (agentTempFile == null || !agentTempFile.exists()) {
-            log("Agent文件不存在，无法注入。");
+            logProgram("Agent文件不存在，无法注入。");
             return;
         }
 
         ProcessItem selected = (ProcessItem) processCombo.getSelectedItem();
         if (selected == null) {
-            log("请先选择一个进程。");
+            logProgram("请先选择一个进程。");
             return;
         }
 
         String pid = selected.id;
-        log("选择进程 PID: " + pid + " (" + selected.displayName + ")");
-        log("正在注入Agent，参数: " + agentArgs);
+        logProgram("选择进程 " + selected.displayName + " (PID: " + pid + ")");
+        logProgram("正在注入Agent...");
 
         new Thread(() -> {
             try {
                 VirtualMachine vm = VirtualMachine.attach(pid);
-                log("正在注入到进程 " + pid);
                 vm.loadAgent(agentTempFile.getAbsolutePath(), agentArgs);
                 vm.detach();
-                SwingUtilities.invokeLater(() -> log("注入完成"));
+                SwingUtilities.invokeLater(() -> logProgram("注入完成"));
             } catch (Exception ex) {
                 ex.printStackTrace();
-                SwingUtilities.invokeLater(() -> log("注入失败：" + ex.getMessage()));
+                SwingUtilities.invokeLater(() -> logProgram("注入失败：" + ex.getMessage()));
             }
         }).start();
     }
 
-    private void log(String msg) {
-        SwingUtilities.invokeLater(() -> {
-            logArea.append(msg + "\n");
+    private void injectPingToGetLogPath() {
+        ProcessItem selected = (ProcessItem) processCombo.getSelectedItem();
+        if (selected == null) {
+            waitingForLogPath = false;
+            return;
+        }
+        if (agentTempFile == null || !agentTempFile.exists()) {
+            logProgram("Agent文件不存在，无法获取日志路径。");
+            waitingForLogPath = false;
+            return;
+        }
 
-            // 限制日志行数不超过100行
-            int lineCount = logArea.getLineCount();
-            if (lineCount > 100) {
-                try {
-                    // 获取需要删除的行数（多余的行数）
-                    int linesToRemove = lineCount - 100;
-                    // 获取第 linesToRemove 行的结束位置（即要保留的第一行的起始位置）
-                    int endOffset = logArea.getLineEndOffset(linesToRemove - 1);
-                    // 删除从开头到该位置的内容
-                    logArea.getDocument().remove(0, endOffset);
-                } catch (javax.swing.text.BadLocationException e) {
-                    e.printStackTrace();
+        // 取消之前正在等待的线程（如果有）
+        synchronized (monitorLock) {
+            if (pingWaitThread != null && pingWaitThread.isAlive()) {
+                pingWaitThread.interrupt();
+            }
+            waitingForLogPath = true; // 标记正在等待
+        }
+
+        Path logsDir = getLogsDirectory();
+        String agentArgs = "{\"action\":\"ping\",\"outputDir\":\"" + logsDir.toString().replace("\\", "\\\\") + "\"}";
+        logProgram("正在注入 ping 以获取MC日志路径...");
+        new Thread(() -> {
+            try {
+                VirtualMachine vm = VirtualMachine.attach(selected.id);
+                vm.loadAgent(agentTempFile.getAbsolutePath(), agentArgs);
+                vm.detach();
+                // 注入成功后，启动等待路径的线程
+                synchronized (monitorLock) {
+                    pingWaitThread = new Thread(() -> waitForMcLogPathAndStart());
+                    pingWaitThread.setDaemon(true);
+                    pingWaitThread.start();
+                }
+            } catch (Exception e) {
+                logProgram("注入 ping 失败：" + e.getMessage());
+                synchronized (monitorLock) {
+                    waitingForLogPath = false;
+                    pingWaitThread = null;
+                    // 删除路径文件
+                    try {
+                        Path logPathFile = getLogsDirectory().resolve("mc_log_path.txt");
+                        Files.deleteIfExists(logPathFile);
+                    } catch (IOException ignored) {}
                 }
             }
+        }).start();
+    }
 
-            logArea.setCaretPosition(logArea.getDocument().getLength());
+    // 程序日志（青色）- 精简版
+    private void logProgram(String msg) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                // 确保当前宽度与视口一致（监听器已处理，这里作为双重保障）
+                Container parent = logPane.getParent();
+                if (parent != null && parent.getWidth() > 0) {
+                    logPane.setSize(parent.getWidth(), logPane.getHeight());
+                }
+
+                logDocument.insertString(logDocument.getLength(), msg + "\n", programStyle);
+
+                // 限制行数：删除最旧的一行
+                Element root = logDocument.getDefaultRootElement();
+                int lineCount = root.getElementCount();
+                if (lineCount > 100) {
+                    Element firstLine = root.getElement(0);
+                    int end = firstLine.getEndOffset();
+                    logDocument.remove(0, end);
+                }
+
+                // 强制重新布局以确保自动换行
+                logPane.revalidate();
+                logPane.repaint();
+
+                logPane.setCaretPosition(logDocument.getLength());
+            } catch (BadLocationException ex) {
+                ex.printStackTrace();
+            }
+        });
+    }
+
+    private void logMC(String msg) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                // 确保当前宽度与视口一致
+                Container parent = logPane.getParent();
+                if (parent != null && parent.getWidth() > 0) {
+                    logPane.setSize(parent.getWidth(), logPane.getHeight());
+                }
+
+                logDocument.insertString(logDocument.getLength(), "[MC] " + msg + "\n", mcStyle);
+
+                Element root = logDocument.getDefaultRootElement();
+                int lineCount = root.getElementCount();
+                if (lineCount > 100) {
+                    Element firstLine = root.getElement(0);
+                    int end = firstLine.getEndOffset();
+                    logDocument.remove(0, end);
+                }
+
+                // 强制重新布局以确保自动换行
+                logPane.revalidate();
+                logPane.repaint();
+
+                logPane.setCaretPosition(logDocument.getLength());
+            } catch (BadLocationException ex) {
+                ex.printStackTrace();
+            }
         });
     }
 
