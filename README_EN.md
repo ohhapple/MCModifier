@@ -22,7 +22,7 @@ This is a Minecraft injector developed with Java. It is used to dynamically modi
     1. Check if your Java version meets the requirement (must be ≥ 11);
     2. If Java is not recognized by the system, configure the environment variables manually, or run the program via the command line;
     3. Do not alter the file structure,Keep all files in the same directory.
-- If the process name contains Chinese characters, garbled characters will appear.
+- Placing it under a Chinese path will cause injection to fail,if the process name contains Chinese characters, garbled characters will appear.
 - If you encounter any bugs, please submit an issue here: https://github.com/ohhapple/MCModifier/issues
 
 ## 📄 Copyright
