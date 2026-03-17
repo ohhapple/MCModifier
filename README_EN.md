@@ -2,7 +2,7 @@
 
 # [中文](README.md) | **English**
 
-# Project Name
+# MCModifier
 > MCModifier
 
 This is a Minecraft injector developed with Java. It is used to dynamically modify Carpet and its auxiliary mods rules outside the Minecraft process, execute custom commands, and monitor the Minecraft console in real time.

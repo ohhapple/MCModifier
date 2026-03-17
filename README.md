@@ -2,7 +2,7 @@
 
 # **中文** | [English](README_EN.md)
 
-# 项目名称
+# MCModifier
 > MCModifier
 
 这是一个基于 Java 开发的Minecraft注入器，用于在Minecraft进程外动态修改carpet及其附属mod的规则并且可以执行自定义命令，同时可监控Minecraft控制台
