@@ -15,7 +15,7 @@ This is a Minecraft injector developed with Java. It is used to dynamically modi
 ## 🚀 Usage
 1. Ensure **Java 11 or a newer version** is installed on your computer (check the version by running `java -version` in Terminal/Command Prompt);
 2. Download the compressed package of this project and extract it;
-3. **Double-click the MCModifier file** directly to launch the program.
+3. **Double-click the MCModifier.jar file Or run Run.bat** directly to launch the program.
 
 ## ⚠️ Precautions(Must watch!!!)
 - If double-clicking the file shows no response:

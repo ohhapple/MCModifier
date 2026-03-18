@@ -452,10 +452,16 @@ public class InjectorApp extends JFrame {
         for (Component comp : container.getComponents()) {
             if (comp instanceof JScrollPane) {
                 JScrollPane scrollPane = (JScrollPane) comp;
-                scrollPane.getVerticalScrollBar().setUI(new DarkScrollBarUI());
-                scrollPane.getHorizontalScrollBar().setUI(new DarkScrollBarUI());
-                scrollPane.getVerticalScrollBar().setBackground(COLOR_BG_PRIMARY);
-                scrollPane.getHorizontalScrollBar().setBackground(COLOR_BG_PRIMARY);
+                JScrollBar verticalBar = scrollPane.getVerticalScrollBar();
+                if (verticalBar != null) {
+                    verticalBar.setUI(new DarkScrollBarUI());
+                    verticalBar.setBackground(COLOR_BG_PRIMARY);
+                }
+                JScrollBar horizontalBar = scrollPane.getHorizontalScrollBar();
+                if (horizontalBar != null) {
+                    horizontalBar.setUI(new DarkScrollBarUI());
+                    horizontalBar.setBackground(COLOR_BG_PRIMARY);
+                }
             } else if (comp instanceof Container) {
                 findAndSetScrollBarUI((Container) comp);
             }
